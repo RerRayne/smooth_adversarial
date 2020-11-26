@@ -18,8 +18,9 @@ from absl import flags
 FLAGS = flags.FLAGS
 
 flags.DEFINE_integer('batch_size', 128, '')
-flags.DEFINE_integer('number_epochs', 50, '')
+flags.DEFINE_integer('number_epochs', 25, '')
 flags.DEFINE_string('dataset', 'cifar10', '')
+flags.DEFINE_string('model', 'PreResNet18', 'architecture to use')
 flags.DEFINE_integer('test_every_steps', 100, '')
 flags.DEFINE_integer('save_every', 100, '')
 flags.DEFINE_string('checkpoint_name', './model.npz', '')
@@ -28,6 +29,8 @@ flags.DEFINE_integer('resize_size', 32, '')
 flags.DEFINE_float('lr', 0.2, '')
 flags.DEFINE_float('eps', 8.0 / 255.0, '')
 flags.DEFINE_float('alpha', 10.0 / 255.0, '')
+flags.DEFINE_float('pgd_alpha', 2.0 / 255.0, '')
+flags.DEFINE_integer('pgd_restarts', 10, '')
 
 
 models = {
@@ -45,7 +48,8 @@ models = {
 
 
 def main(argv):
-    # Some hparams
+    del argv
+
     seed = random.Random().randint(0, sys.maxsize)
     rnd_key = jax.random.PRNGKey(seed)
 
@@ -58,12 +62,7 @@ def main(argv):
     train_steps = batches_per_train * FLAGS.number_epochs
     test_steps = batches_per_test
 
-    model = models['PreResNet18']
-    # model = models['ResNet50']
-
-    # This one for CIFAR10/100. For example MNIST has only one channel
-    # [1, w, h, chanels_number]
-    sample_size = [1, FLAGS.crop_size, FLAGS.crop_size, 3]
+    model = models[FLAGS.model]
 
     # Create dataset
     train_ds = input_pipeline.get_data(dataset=FLAGS.dataset,
@@ -113,14 +112,14 @@ def main(argv):
     p_eval_step = jax.pmap(utils.eval_step, axis_name='batch')
     p_eval_robust_step = jax.pmap(functools.partial(utils.robust_eval_step,
                                                     eps=FLAGS.eps,
-                                                    alpha=FLAGS.alpha),
+                                                    pgd_alpha=FLAGS.pgd_alpha),
                                   axis_name='batch')
 
     # Metrics
     steps = []
     accs = []
     losses = []
-    rnd_key_repl = flax_utils.replicate(rnd_key)
+
     # Start training
     print('Number of steps', train_steps, flush=True)
     for step, batch in zip(range(1, train_steps + 1), train_ds.as_numpy_iterator()):
@@ -141,10 +140,21 @@ def main(argv):
                 metrics = p_eval_step(opt_repl.target,
                                       state_repl,
                                       batch)
-                r_metrics = p_eval_robust_step(opt=opt_repl,
-                                               rnd_key=rnd_key_repl,
-                                               state=state_repl,
-                                               batch=batch)
+                r_metrics = None
+                for _ in range(FLAGS.pgd_restarts):
+                    r_m = p_eval_robust_step(opt=opt_repl,
+                                             state=state_repl,
+                                             batch=batch)
+                    r_m['loss'] = np.array(r_m['loss'])
+                    r_m['error_rate'] = np.array(r_m['error_rate'])
+                    if r_metrics is None:
+                        r_metrics = r_m
+                    else:
+                        for idx, (loss_new, loss_old) in enumerate(zip(r_m['loss'], r_metrics['loss'])):
+                            if loss_new > loss_old:
+                                r_metrics['loss'][idx] = loss_new
+                                r_metrics['error_rate'][idx] = r_m['error_rate'][idx]
+
                 loss.append(metrics['loss'])
                 acc.append(1.0 - metrics['error_rate'])
                 r_loss.append(r_metrics['loss'])

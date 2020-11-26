@@ -5,6 +5,8 @@ import functools
 import io
 import numpy as np
 
+from cleverhans.future.jax.attacks import projected_gradient_descent as pgd
+
 
 def save_ckpt(model_params, path):
     val, _ = jax.tree_flatten(model_params)
@@ -143,11 +145,11 @@ def compute_metrics(logits, labels):
     return metrics
 
 
-def robust_eval_step(opt, rnd_key, eps, alpha, state, batch):
-    delta = calculate_delta(opt, state, rnd_key, batch, eps, alpha)
+def robust_eval_step(opt, eps, pgd_alpha, state, batch):
     state = jax.lax.pmean(state, 'batch')
+    adv_x = pgd(opt.target, batch['image'], eps, pgd_alpha, 50, np.inf)
     with flax.nn.stateful(state, mutable=False):
-        logits = opt.target(batch['image'] + delta, train=False)
+        logits = opt.target(adv_x, train=False)
     return compute_metrics(logits, batch['label'])
 
 
