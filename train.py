@@ -3,6 +3,10 @@ import jax
 import numpy as np
 import random
 import sys
+import wandb
+
+import tensorflow as tf
+from tensorflow.keras.mixed_precision import experimental as mixed_precision
 
 import flax.optim as optim
 import flax.jax_utils as flax_utils
@@ -18,10 +22,11 @@ from absl import flags
 FLAGS = flags.FLAGS
 
 flags.DEFINE_integer('batch_size', 128, '')
-flags.DEFINE_integer('number_epochs', 25, '')
+flags.DEFINE_integer('eval_batch_size', 10240, '')
+flags.DEFINE_integer('number_epochs', 15, '')
 flags.DEFINE_string('dataset', 'cifar10', '')
 flags.DEFINE_string('model', 'PreResNet18', 'architecture to use')
-flags.DEFINE_integer('test_every_steps', 100, '')
+flags.DEFINE_integer('test_every_steps', 500, '')
 flags.DEFINE_integer('save_every', 100, '')
 flags.DEFINE_string('checkpoint_name', './model.npz', '')
 flags.DEFINE_integer('crop_size', 32, '')
@@ -31,7 +36,6 @@ flags.DEFINE_float('eps', 8.0 / 255.0, '')
 flags.DEFINE_float('alpha', 10.0 / 255.0, '')
 flags.DEFINE_float('pgd_alpha', 2.0 / 255.0, '')
 flags.DEFINE_integer('pgd_restarts', 10, '')
-
 
 models = {
     'ResNet50': models.ResNet50,
@@ -46,9 +50,24 @@ models = {
     'PreResNet18': models.PreActResNet18,
 }
 
+cifar10_mean = np.array([0.4914, 0.4822, 0.4465])
+cifar10_std = np.array([0.2471, 0.2435, 0.2616])
+
+upper_limit = ((1 - cifar10_mean) / cifar10_std)
+lower_limit = ((0 - cifar10_mean) / cifar10_std)
+
 
 def main(argv):
     del argv
+
+    # On TPUs, use 'mixed_bfloat16' instead
+    # policy = tf.keras.mixed_precision.experimental.Policy('mixed_float16')
+    # mixed_precision.set_policy(policy)
+    #
+    # print('Compute dtype: %s' % policy.compute_dtype)
+    # print('Variable dtype: %s' % policy.variable_dtype)
+
+    wandb.init(project='smooth_adversarial')
 
     seed = random.Random().randint(0, sys.maxsize)
     rnd_key = jax.random.PRNGKey(seed)
@@ -57,7 +76,7 @@ def main(argv):
     batches_per_train = int(np.ceil(train_info['num_examples'] / FLAGS.batch_size))
 
     test_info = input_pipeline.get_dataset_info(FLAGS.dataset, 'test', examples_per_class=None)
-    batches_per_test = int(np.ceil(test_info['num_examples'] / FLAGS.batch_size))
+    batches_per_test = int(np.ceil(test_info['num_examples'] / FLAGS.eval_batch_size))
 
     train_steps = batches_per_train * FLAGS.number_epochs
     test_steps = batches_per_test
@@ -80,7 +99,7 @@ def main(argv):
     test_ds = input_pipeline.get_data(dataset=FLAGS.dataset,
                                       mode='test',
                                       repeats=None,
-                                      batch_size=FLAGS.batch_size,
+                                      batch_size=FLAGS.eval_batch_size,
                                       resize_size=FLAGS.resize_size,
                                       crop_size=FLAGS.crop_size,
                                       mixup_alpha=None,
@@ -105,14 +124,18 @@ def main(argv):
 
     # Create function for training
     lr_fn = utils.cyclic_lr(FLAGS.lr, train_steps)
+    alpha = FLAGS.alpha / cifar10_std
+    eps = FLAGS.eps / cifar10_std
+    pgd_alpha = FLAGS.pgd_alpha / cifar10_std
     update_fn = jax.pmap(functools.partial(utils.update_stateful,
-                                           eps=FLAGS.eps,
-                                           alpha=FLAGS.alpha),
+                                           eps=eps,
+                                           alpha=alpha),
                          axis_name='batch')
-    p_eval_step = jax.pmap(utils.eval_step, axis_name='batch')
+    p_eval_step = jax.pmap(utils.eval_step,
+                           axis_name='batch')
     p_eval_robust_step = jax.pmap(functools.partial(utils.robust_eval_step,
-                                                    eps=FLAGS.eps,
-                                                    pgd_alpha=FLAGS.pgd_alpha),
+                                                    eps=eps,
+                                                    pgd_alpha=pgd_alpha),
                                   axis_name='batch')
 
     # Metrics
@@ -121,44 +144,48 @@ def main(argv):
     losses = []
 
     # Start training
+    mean, std = [], []
     print('Number of steps', train_steps, flush=True)
     for step, batch in zip(range(1, train_steps + 1), train_ds.as_numpy_iterator()):
         # Generate a PRNG key that will be rolled into the batch
         rng, step_key = jax.random.split(rnd_key)
         # Shard the step PRNG key
         sharded_keys = common_utils.shard_prng_key(step_key)
+        curr_lr = lr_fn(step - 1)
+        sharded_lr = flax_utils.replicate(curr_lr)
+        a = np.array(batch['image'])
+        mean.append(np.mean(a.reshape((-1, 3)), axis=0))
+        std.append(np.std(a.reshape((-1, 3)), axis=0))
+        wandb.log({"lr": curr_lr},
+                  step=step)
         opt_repl, state_repl = update_fn(opt=opt_repl,
                                          batch=batch,
                                          state=state_repl,
                                          rnd_key=sharded_keys,
-                                         lr=flax_utils.replicate(lr_fn(step)))
+                                         lr=sharded_lr)
 
-        if step % FLAGS.test_every_steps == 0:
+        if step % FLAGS.test_every_steps == 0 or step == 1 or step == train_steps:
             loss, acc = [], []
             r_loss, r_acc = [], []
-            for idx, batch in zip(range(test_steps), test_ds.as_numpy_iterator()):
+            for batch_idx, batch in zip(range(test_steps), test_ds.as_numpy_iterator()):
                 metrics = p_eval_step(opt_repl.target,
                                       state_repl,
                                       batch)
-                r_metrics = None
-                for _ in range(FLAGS.pgd_restarts):
-                    r_m = p_eval_robust_step(opt=opt_repl,
-                                             state=state_repl,
-                                             batch=batch)
-                    r_m['loss'] = np.array(r_m['loss'])
-                    r_m['error_rate'] = np.array(r_m['error_rate'])
-                    if r_metrics is None:
-                        r_metrics = r_m
-                    else:
-                        for idx, (loss_new, loss_old) in enumerate(zip(r_m['loss'], r_metrics['loss'])):
-                            if loss_new > loss_old:
-                                r_metrics['loss'][idx] = loss_new
-                                r_metrics['error_rate'][idx] = r_m['error_rate'][idx]
+                r_metrics = p_eval_robust_step(opt=opt_repl,
+                                               state=state_repl,
+                                               rnd_key=sharded_keys,
+                                               batch=batch)
 
                 loss.append(metrics['loss'])
                 acc.append(1.0 - metrics['error_rate'])
                 r_loss.append(r_metrics['loss'])
                 r_acc.append(1.0 - r_metrics['error_rate'])
+
+            wandb.log({"loss": np.mean(loss),
+                       "acc": np.mean(acc),
+                       "robust_loss": np.mean(r_loss),
+                       "robust_acc": np.mean(r_acc)},
+                      step=step)
             print("Test on step", step,
                   "@loss:", np.mean(loss),
                   "@acc:", np.mean(acc),
@@ -169,8 +196,8 @@ def main(argv):
             accs.append(np.mean(acc))
             losses.append(np.mean(loss))
             steps.append(step)
+    print('final', np.mean(mean, axis=0), np.mean(std, axis=0))
 
 
 if __name__ == '__main__':
     app.run(main)
-

@@ -1,1 +1,6 @@
+absl
+flax
+jax
+numpy
 cleverhans
+wandb
