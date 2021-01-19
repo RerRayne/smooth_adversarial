@@ -6,16 +6,28 @@ Reference:
 '''
 import flax
 from flax import nn
+import jax.numpy as jnp
+import jax.experimental.host_callback
 
 import jax.nn
 
 
 class PreActBlock(nn.Module):
     def apply(self, x, in_planes, planes, stride=1, expansion=1, train=True):
+        x = x * 0.0 + 1
+        x = jax.experimental.host_callback.id_print(jnp.mean(x), result = x, a = "X mean")
         y = nn.BatchNorm(x,
+                         # axis=(1,2,3),
                          use_running_average=not train,
+                         # use_running_average=True,
                          momentum=0.9,
+                         # momentum=0.2,
                          epsilon=1e-5)
+        y = x
+        y = jax.experimental.host_callback.id_print(jnp.mean(y), result = y, a = "After batchnorm")
+
+        print(y.shape)
+        # y = x
         y = jax.nn.relu(y)
         if stride != 1 or in_planes != expansion * planes:
             short_y = nn.Conv(inputs=y,
@@ -33,10 +45,12 @@ class PreActBlock(nn.Module):
                     strides=(stride, stride),
                     padding=((1, 1), (1, 1)),
                     bias=False)
+        z = y
         y = nn.BatchNorm(y,
                          use_running_average=not train,
                          momentum=0.9,
                          epsilon=1e-5)
+        y = z
         y = jax.nn.relu(y)
         y = nn.Conv(inputs=y,
                     features=planes,
@@ -45,6 +59,7 @@ class PreActBlock(nn.Module):
                     padding=((1, 1), (1, 1)),
                     bias=False)
         y += short_y
+        # y *= 0.0
         return y
 
 
@@ -143,6 +158,11 @@ class PreActResNet(nn.Module):
                                    stride=2,
                                    expansion=expansion,
                                    train=train)
+        y = jax.nn.relu(y)
+        y = nn.BatchNorm(y,
+                         use_running_average=not train,
+                         momentum=0.9,
+                         epsilon=1e-5)
         y = flax.nn.avg_pool(y, window_shape=(4, 4))
         y = y.reshape((y.shape[0], -1))
         y = nn.Dense(y, features=num_outputs)

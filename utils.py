@@ -7,7 +7,6 @@ import numpy as np
 
 from jax.experimental import loops
 
-from cleverhans.future.jax.attacks import projected_gradient_descent as pgd
 
 cifar10_mean = np.array([0.4914, 0.4822, 0.4465])
 cifar10_std = np.array([0.2471, 0.2435, 0.2616])
@@ -34,15 +33,19 @@ def load_ckpt(tree, path):
     return tree.unflatten(val)
 
 
-def cyclic_lr(base_lr, num_steps):
+def cyclic_lr(
+         base_lr,
+         max_lr,
+         step_size_up,
+         step_size_down,
+):
     def step_fn(step):
-        assert step < num_steps
-        N = np.ceil(num_steps / 2)
-        if step < N:
-            lr = base_lr * step / N
-        else:
-            lr = base_lr * (1.0 - (step % N) / N)
-        return lr
+        # if step < step_size_up:
+        #     return base_lr + step * ((max_lr - base_lr) / step_size_up)
+        # else:
+        #     step = step - step_size_up
+        #     return max_lr - step * ((max_lr - base_lr) / step_size_down)
+        return max_lr
 
     return step_fn
 
@@ -152,7 +155,7 @@ def update_delta(x, delta, g_d, eps, alpha, channels_number):
         input = x[..., channel_idx]
         lower = lower_limit[channel_idx] - input
         upper = upper_limit[channel_idx] - input
-        new_d = jnp.maximum(jnp.minimum(new_d[:input.shape[0]], upper), lower)
+        new_d = jnp.maximum(jnp.minimum(new_d, upper), lower)
 
         deltas.append(new_d)
     delta = jnp.stack(deltas, axis=-1)
@@ -183,11 +186,14 @@ def update_stateful(opt, state, rnd_key, lr, batch, eps, alpha):
     def loss_fn(model, delta):
         with flax.nn.stateful(state) as new_state:
             with flax.nn.stochastic(rnd_key):
-                logits = model(batch['image'] + delta[:batch['image'].shape[0]])
+                logits = model(batch['image'] + delta)
         loss = cross_entropy_loss(logits, batch['label'])
         return loss, (new_state, logits)
+
+    _, key = jax.random.split(rnd_key)
+
     # Calculate distortion
-    delta = calculate_delta(opt, state, rnd_key, batch, eps, alpha)
+    delta = calculate_delta(opt, state, key, batch, eps, alpha)
 
     # Optimization step
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
@@ -197,15 +203,16 @@ def update_stateful(opt, state, rnd_key, lr, batch, eps, alpha):
     return new_opt, new_state
 
 
-def compute_metrics(logits, labels):
-    loss = cross_entropy_loss(logits, labels)
-    error_rate = jnp.mean(jnp.argmax(logits, -1) != jnp.argmax(labels, -1))
-    metrics = {
-        'loss': loss,
-        'error_rate': error_rate,
-    }
-    metrics = jax.lax.pmean(metrics, 'batch')
-    return metrics
+# def compute_metrics(logits, labels):
+#     loss = cross_entropy_loss(logits, labels)
+#     error_rate = jnp.mean(jnp.argmax(logits, -1) != jnp.argmax(labels, -1))
+#     metrics = {
+#         'loss': loss,
+#         'error_rate': error_rate,
+#         'logits': logits,
+#     }
+#     # metrics = jax.lax.pmean(metrics, 'batch')
+#     return metrics
 
 
 def robust_eval_step(opt, eps, rnd_key, pgd_alpha, state, batch):
@@ -224,6 +231,19 @@ def eval_step(model, state, batch):
         logits = model(batch['image'], train=False)
     return compute_metrics(logits, batch['label'])
 
+total_weights = 0
+def reset_weights(params, val):
+    return params
+    global total_weights
+    if isinstance(params, dict):
+        for k in params:
+            params[k] = reset_weights(params[k], val)
+    else:
+        import itertools
+        total_weights += list(itertools.accumulate(params.shape, lambda x, y: x * y))[-1]
+        print("AFTER ANNIHILATING PARAMS HAVE", total_weights, "WEIGHTS")
+        return params * 0.0 + val
+    return params
 
 @functools.partial(jax.jit, static_argnums=(1, 2, 3, 4))
 def create_model(prng_key, batch_size, image_size, channels_number, model_def):
@@ -232,6 +252,7 @@ def create_model(prng_key, batch_size, image_size, channels_number, model_def):
         with flax.nn.stochastic(jax.random.PRNGKey(0)):
             _, initial_params = model_def.init_by_shape(
                 prng_key, [(input_shape, jnp.float32)])
+            initial_params = reset_weights(initial_params, 0.1)
             model = flax.nn.Model(model_def, initial_params)
     return model, init_state
 
@@ -242,8 +263,9 @@ def compute_metrics(logits, labels):
     metrics = {
         'loss': loss,
         'error_rate': error_rate,
+        'logits': logits,
     }
-    metrics = jax.lax.pmean(metrics, 'batch')
+    # metrics = jax.lax.pmean(metrics, 'batch')
     return metrics
 
 

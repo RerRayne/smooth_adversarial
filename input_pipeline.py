@@ -21,6 +21,7 @@ import tensorflow_probability as tfp
 import tensorflow_datasets as tfds
 
 import numpy as np
+import jax.numpy as jnp
 
 
 # Adjust depending on the available RAM.
@@ -28,9 +29,9 @@ MAX_IN_MEMORY = 200_000
 
 
 DATASET_SPLITS = {
-  'cifar10': {'train': 'train[:98%]', 'test': 'test'},
-  'cifar100': {'train': 'train[:98%]', 'test': 'test'},
-  'imagenet2012': {'train': 'train[:99%]', 'test': 'validation'},
+  'cifar10': {'train': 'train', 'test': 'test'},
+  'cifar100': {'train': 'train', 'test': 'test'},
+  'imagenet2012': {'train': 'train', 'test': 'validation'},
 }
 
 
@@ -72,7 +73,7 @@ def sample_subset(data, num_examples, num_classes,
 
 def get_data(dataset, mode,
              repeats, batch_size,
-             resize_size, crop_size,
+             crop_size,
              mixup_alpha,
              examples_per_class, examples_per_class_seed,
              num_devices,
@@ -97,14 +98,21 @@ def get_data(dataset, mode,
 
   def _pp(data):
     im = decoder(data['image'])
+    im = tf.image.convert_image_dtype(im, tf.float32)
+
     if mode == 'train':
-      im = tf.image.resize(im, [resize_size, resize_size])
+      # im = tf.image.resize(im, [resize_size, resize_size])
+      im = tf.image.pad_to_bounding_box(im, 4, 4, 40, 40)
       im = tf.image.random_crop(im, [crop_size, crop_size, 3])
       im = tf.image.flip_left_right(im)
     else:
       # usage of crop_size here is intentional
-      im = tf.image.resize(im, [crop_size, crop_size])
-    im = (im - 127.5) / 127.5
+      # im = tf.image.resize(im, [crop_size, crop_size])
+      pass
+    im_channels = []
+    for channel_idx, (mean, std) in enumerate(zip([0.4914, 0.4822, 0.4465], [0.2471, 0.2435, 0.2616])):
+      im_channels.append((im[..., channel_idx] - mean)/std)
+    im = tf.stack(im_channels, axis=-1)
     label = tf.one_hot(data['label'], dataset_info['num_classes'])
     return {'image': im, 'label': label}
 
@@ -137,4 +145,4 @@ def get_data(dataset, mode,
   if num_devices is not None:
     data = data.map(_shard, tf.data.experimental.AUTOTUNE)
 
-  return data.prefetch(1)
+  return data.prefetch(2)
