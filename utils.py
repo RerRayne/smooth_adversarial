@@ -40,12 +40,12 @@ def cyclic_lr(
          step_size_down,
 ):
     def step_fn(step):
-        # if step < step_size_up:
-        #     return base_lr + step * ((max_lr - base_lr) / step_size_up)
-        # else:
-        #     step = step - step_size_up
-        #     return max_lr - step * ((max_lr - base_lr) / step_size_down)
-        return max_lr
+        if step < step_size_up:
+            return base_lr + step * ((max_lr - base_lr) / step_size_up)
+        else:
+            step = step - step_size_up
+            return max_lr - step * ((max_lr - base_lr) / step_size_down)
+        # return max_lr
 
     return step_fn
 
@@ -68,6 +68,10 @@ def constant_lr(base_lr, num_steps, warmup=0):
     del warmup
     return step_fn
 
+
+# def cross_entory_loss_vec(logits, labels):
+#     logp = jax.nn.log_softmax(logits)
+#     return jnp.sum(logp * labels, axis=1)
 
 def cross_entory_loss_vec(logits, labels):
     logp = jax.nn.log_softmax(logits)
@@ -197,7 +201,8 @@ def update_stateful(opt, state, rnd_key, lr, batch, eps, alpha):
 
     # Optimization step
     grad_fn = jax.value_and_grad(loss_fn, has_aux=True)
-    (_, (new_state, logits)), grad = grad_fn(opt.target, delta)
+    (loss, (new_state, logits)), grad = grad_fn(opt.target, delta)
+    # loss = jax.experimental.host_callback.id_print(jnp.mean(loss), result=loss)
     grad = jax.lax.pmean(grad, 'batch')
     new_opt = opt.apply_gradient(grad, learning_rate=lr)
     return new_opt, new_state

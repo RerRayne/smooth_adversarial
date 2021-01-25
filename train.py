@@ -6,6 +6,8 @@ import random
 import sys
 import wandb
 
+from jax.config import config
+config.update('jax_disable_jit', True)
 import tensorflow as tf
 from tensorflow.keras.mixed_precision import experimental as mixed_precision
 
@@ -148,6 +150,28 @@ def main(argv):
     alpha = FLAGS.alpha / cifar10_std
     eps = FLAGS.eps / cifar10_std
     pgd_alpha = FLAGS.pgd_alpha / cifar10_std
+
+    def rid_dev(value):
+        if isinstance(value, list):
+            return value[0]
+        if 'shape' in dir(value):
+            return value[0]
+        if isinstance(value, dict):
+            rv = dict()
+            for k in value.keys():
+                rv[k] = rid_dev(value[k])
+            return rv
+        return value
+
+    def hack_pmap(fun, axis_name=None, **kwargs):
+        def wrapper(*args, **kwargs):
+            for k in kwargs.keys():
+                kwargs[k] = rid_dev(kwargs[k])
+            for i, v in enumerate(args):
+                args[i] = rid_dev(v)
+            return fun(*args, **kwargs)
+
+        return wrapper
     update_fn = jax.pmap(functools.partial(utils.update_stateful,
                                            eps=eps,
                                            alpha=alpha),
@@ -170,34 +194,36 @@ def main(argv):
 
     for step, batch in zip(range(1, train_steps + 1), train_ds.as_numpy_iterator()):
         # Generate a PRNG key that will be rolled into the batch
+        # batch['label'] *= 0
+        # batch['label'][..., 0] = 1
         rng, step_key = jax.random.split(rnd_key)
         # Shard the step PRNG key
         sharded_keys = common_utils.shard_prng_key(step_key)
 
-        if step % FLAGS.test_every_steps == 0 or step == 1 or step == train_steps:
-            loss, acc = [], []
-            r_loss, r_acc = [], []
-            for batch_idx, batch in zip(range(test_steps), test_ds.as_numpy_iterator()):
-                metrics = p_eval_step(opt_repl.target,
-                                      state_repl,
-                                      batch)
-                # r_metrics = p_eval_robust_step(opt=opt_repl,
-                #                                state=state_repl,
-                #                                rnd_key=sharded_keys,
-                #                                batch=batch)
+        # if False and (step % FLAGS.test_every_steps == 0 or step == 1 or step == train_steps):
+        #     loss, acc = [], []
+        #     r_loss, r_acc = [], []
+        #     for batch_idx, batch in zip(range(test_steps), test_ds.as_numpy_iterator()):
+        #         metrics = p_eval_step(opt_repl.target,
+        #                               state_repl,
+        #                               batch)
+        #         # r_metrics = p_eval_robust_step(opt=opt_repl,
+        #         #                                state=state_repl,
+        #         #                                rnd_key=sharded_keys,
+        #         #                                batch=batch)
+        #
+        #         loss.append(metrics['loss'])
+        #         acc.append(1.0 - metrics['error_rate'])
+        #         # r_loss.append(r_metrics['loss'])
+        #         # r_acc.append(1.0 - r_metrics['error_rate'])
 
-                loss.append(metrics['loss'])
-                acc.append(1.0 - metrics['error_rate'])
-                # r_loss.append(r_metrics['loss'])
-                # r_acc.append(1.0 - r_metrics['error_rate'])
-
-            print("Test on step", step,
-                  "@loss:", np.mean(loss),
-                  "@acc:", np.mean(acc),
-                  # "@r_loss:", np.mean(r_loss),
-                  # "@r_acc:", np.mean(r_acc),
-                  flush=True)
-            exit(0)
+            # print("Test on step", step,
+            #       "@loss:", np.mean(loss),
+            #       "@acc:", np.mean(acc),
+            #       # "@r_loss:", np.mean(r_loss),
+            #       # "@r_acc:", np.mean(r_acc),
+            #       flush=True)
+            # exit(0)
 
         curr_lr = lr_fn(step - 1)
         sharded_lr = flax_utils.replicate(curr_lr)
@@ -218,40 +244,41 @@ def main(argv):
                                          state=state_repl,
                                          rnd_key=sharded_keys,
                                          lr=sharded_lr)
+        # break
 
-        # if step % FLAGS.test_every_steps == 0 or step == 1 or step == train_steps:
-        #     loss, acc = [], []
-        #     r_loss, r_acc = [], []
-        #     for batch_idx, batch in zip(range(test_steps), test_ds.as_numpy_iterator()):
-        #         metrics = p_eval_step(opt_repl.target,
-        #                               state_repl,
-        #                               batch)
-        #         r_metrics = p_eval_robust_step(opt=opt_repl,
-        #                                        state=state_repl,
-        #                                        rnd_key=sharded_keys,
-        #                                        batch=batch)
-        #
-        #         loss.append(metrics['loss'])
-        #         acc.append(1.0 - metrics['error_rate'])
-        #         r_loss.append(r_metrics['loss'])
-        #         r_acc.append(1.0 - r_metrics['error_rate'])
-        #
-        #     # wandb.log({"loss": np.mean(loss),
-        #     #            "acc": np.mean(acc),
-        #     #            "robust_loss": np.mean(r_loss),
-        #     #            "robust_acc": np.mean(r_acc)},
-        #     #           step=step)
-        #     print("Test on step", step,
-        #           "@loss:", np.mean(loss),
-        #           "@acc:", np.mean(acc),
-        #           "@r_loss:", np.mean(r_loss),
-        #           "@r_acc:", np.mean(r_acc),
-        #           flush=True)
+        if step % FLAGS.test_every_steps == 0 or step == 1 or step == train_steps:
+            loss, acc = [], []
+            r_loss, r_acc = [], []
+            for batch_idx, batch in zip(range(test_steps), test_ds.as_numpy_iterator()):
+                metrics = p_eval_step(opt_repl.target,
+                                      state_repl,
+                                      batch)
+                # r_metrics = p_eval_robust_step(opt=opt_repl,
+                #                                state=state_repl,
+                #                                rnd_key=sharded_keys,
+                #                                batch=batch)
 
-            # accs.append(np.mean(acc))
-            # losses.append(np.mean(loss))
-            # steps.append(step)
-    # print('final', np.mean(mean, axis=0), np.mean(std, axis=0))
+                loss.append(metrics['loss'])
+                acc.append(1.0 - metrics['error_rate'])
+                # r_loss.append(r_metrics['loss'])
+                # r_acc.append(1.0 - r_metrics['error_rate'])
+
+            # wandb.log({"loss": np.mean(loss),
+            #            "acc": np.mean(acc),
+            #            "robust_loss": np.mean(r_loss),
+            #            "robust_acc": np.mean(r_acc)},
+            #           step=step)
+            print("Test on step", step,
+                  "@loss:", np.mean(loss),
+                  "@acc:", np.mean(acc),
+                  # "@r_loss:", np.mean(r_loss),
+                  # "@r_acc:", np.mean(r_acc),
+                  flush=True)
+
+            accs.append(np.mean(acc))
+            losses.append(np.mean(loss))
+            steps.append(step)
+    print('final', np.mean(mean, axis=0), np.mean(std, axis=0))
 
 
 if __name__ == '__main__':
