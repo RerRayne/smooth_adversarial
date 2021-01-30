@@ -99,15 +99,15 @@ def evaluate(opt, images, labels, model_fn):
 def attack_pgd(opt, state, rnd_key, batch, eps, alpha,  attack_iters, restarts):
     def loss_fn(model, d, input_batch):
         with flax.nn.stateful(state) as new_state:
-            with flax.nn.stochastic(rnd_key):
-                logits = model(input_batch['image'] + d)
+            # with flax.nn.stochastic(rnd_key):
+                logits = model(input_batch['image'] + d, train = False)
         loss = cross_entropy_loss(logits, input_batch['label'])
         return loss
 
     def loss_vec_fn(model, delta):
         with flax.nn.stateful(state) as new_state:
-            with flax.nn.stochastic(rnd_key):
-                logits = model(batch['image'] + delta)
+            # with flax.nn.stochastic(rnd_key):
+                logits = model(batch['image'] + delta, train = False)
         loss = cross_entory_loss_vec(logits, batch['label'])
         return loss
 
@@ -115,7 +115,7 @@ def attack_pgd(opt, state, rnd_key, batch, eps, alpha,  attack_iters, restarts):
     # max_loss = jnp.zeros((y.shape[0]))
     # max_delta = jnp.zeros_like(X)
     # eps = eps * 0.0 + 3.0
-    restarts = 1
+    # restarts = 1
     with loops.Scope() as s:
         s.max_loss = jnp.zeros((y.shape[0]))
         s.max_delta = jnp.zeros_like(X)
@@ -124,7 +124,7 @@ def attack_pgd(opt, state, rnd_key, batch, eps, alpha,  attack_iters, restarts):
             s.delta = init_delta(rnd_key, eps, batch)
             for _ in s.range(attack_iters):
                 with flax.nn.stateful(state) as new_state:
-                    with flax.nn.stochastic(rnd_key):
+                    # with flax.nn.stochastic(rnd_key):
                         logits = opt.target(batch['image'] + s.delta, train=False)
                 hit = (jnp.argmax(logits, -1) == jnp.argmax(batch['label'], -1)).reshape(-1, 1, 1, 1)
                 # hit = jax.experimental.host_callback.id_print(jnp.sum(hit), result=hit, a='HIT')
@@ -139,10 +139,10 @@ def attack_pgd(opt, state, rnd_key, batch, eps, alpha,  attack_iters, restarts):
             # indexes = jax.experimental.host_callback.id_print(jnp.sum(indexes), result=indexes, a='WILL REPLACE')
             s.max_delta = s.max_delta * (1 - indexes) + s.delta * indexes
             s.max_loss = jnp.maximum(s.max_loss, loss)
-            with flax.nn.stateful(state) as new_state:
-                with flax.nn.stochastic(rnd_key):
-                    logits = opt.target(batch['image'] + s.max_delta, train=False)
-            hit = (jnp.argmax(logits, -1) == jnp.argmax(batch['label'], -1)).reshape(-1, 1, 1, 1)
+            # with flax.nn.stateful(state) as new_state:
+            #     with flax.nn.stochastic(rnd_key):
+            #         logits = opt.target(batch['image'] + s.max_delta, train=False)
+            # hit = (jnp.argmax(logits, -1) == jnp.argmax(batch['label'], -1)).reshape(-1, 1, 1, 1)
             # s.max_delta = jax.experimental.host_callback.id_print(jnp.sum(hit), result=s.max_delta, a='FINAL HIT')
 
             # s.max_loss = jax.experimental.host_callback.id_print(jnp.mean(max_loss), result=max_loss, a='max_loss')

@@ -26,7 +26,7 @@ from absl import flags
 FLAGS = flags.FLAGS
 
 flags.DEFINE_integer('batch_size', 128, '')
-flags.DEFINE_integer('eval_batch_size', 1024, '')
+flags.DEFINE_integer('eval_batch_size', 64, '')
 flags.DEFINE_integer('number_epochs', 15, '')
 flags.DEFINE_string('dataset', 'cifar10', '')
 flags.DEFINE_string('model', 'PreResNet18', 'architecture to use')
@@ -263,9 +263,12 @@ def main(argv):
             loss, acc = [], []
             r_loss, r_acc = [], []
             for batch_idx, test_batch in zip(range(test_steps), test_ds.as_numpy_iterator()):
+                print("Start evaluate normal")
                 metrics = p_eval_step(opt_repl.target,
                                       state_repl,
                                       test_batch)
+                print("Start evaluate attack")
+
                 r_metrics = p_eval_robust_step(opt=opt_repl,
                                                    state=state_repl,
                                                    rnd_key=sharded_keys,
