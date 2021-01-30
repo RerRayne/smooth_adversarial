@@ -7,6 +7,7 @@ import sys
 import wandb
 
 from jax.config import config
+
 config.update('jax_disable_jit', True)
 import tensorflow as tf
 from tensorflow.keras.mixed_precision import experimental as mixed_precision
@@ -57,7 +58,6 @@ cifar10_std = np.array([0.2471, 0.2435, 0.2616])
 
 upper_limit = ((1 - cifar10_mean) / cifar10_std)
 lower_limit = ((0 - cifar10_mean) / cifar10_std)
-
 
 def main(argv):
     del argv
@@ -145,8 +145,8 @@ def main(argv):
     lr_fn = utils.cyclic_lr(
         base_lr=0.0,
         max_lr=FLAGS.lr,
-        step_size_up=train_steps/2,
-        step_size_down=train_steps/2)
+        step_size_up=train_steps / 2,
+        step_size_down=train_steps / 2)
     alpha = FLAGS.alpha / cifar10_std
     eps = FLAGS.eps / cifar10_std
     pgd_alpha = FLAGS.pgd_alpha / cifar10_std
@@ -172,6 +172,7 @@ def main(argv):
             return fun(*args, **kwargs)
 
         return wrapper
+
     update_fn = jax.pmap(functools.partial(utils.update_stateful,
                                            eps=eps,
                                            alpha=alpha),
@@ -179,9 +180,9 @@ def main(argv):
     p_eval_step = jax.pmap(utils.eval_step,
                            axis_name='batch')
     p_eval_robust_step = jax.pmap(functools.partial(utils.robust_eval_step,
-                                                    eps=eps,
-                                                    pgd_alpha=pgd_alpha),
-                                  axis_name='batch')
+                                                            eps=eps,
+                                                            pgd_alpha=pgd_alpha),
+                                          axis_name='batch')
 
     # Metrics
     steps = []
@@ -192,6 +193,8 @@ def main(argv):
     mean, std = [], []
     print('Number of steps', train_steps, flush=True)
 
+    train_acc = []
+    train_loss = []
     for step, batch in zip(range(1, train_steps + 1), train_ds.as_numpy_iterator()):
         # Generate a PRNG key that will be rolled into the batch
         # batch['label'] *= 0
@@ -217,13 +220,13 @@ def main(argv):
         #         # r_loss.append(r_metrics['loss'])
         #         # r_acc.append(1.0 - r_metrics['error_rate'])
 
-            # print("Test on step", step,
-            #       "@loss:", np.mean(loss),
-            #       "@acc:", np.mean(acc),
-            #       # "@r_loss:", np.mean(r_loss),
-            #       # "@r_acc:", np.mean(r_acc),
-            #       flush=True)
-            # exit(0)
+        # print("Test on step", step,
+        #       "@loss:", np.mean(loss),
+        #       "@acc:", np.mean(acc),
+        #       # "@r_loss:", np.mean(r_loss),
+        #       # "@r_acc:", np.mean(r_acc),
+        #       flush=True)
+        # exit(0)
 
         curr_lr = lr_fn(step - 1)
         sharded_lr = flax_utils.replicate(curr_lr)
@@ -239,45 +242,69 @@ def main(argv):
         #                       state_repl,
         #                       new_batch)
         # print(metrics['logits'])
-        opt_repl, state_repl = update_fn(opt=opt_repl,
+        opt_repl, state_repl, delta = update_fn(opt=opt_repl,
                                          batch=batch,
                                          state=state_repl,
                                          rnd_key=sharded_keys,
                                          lr=sharded_lr)
+        input_batch = dict()
+        input_batch['image'] = batch['image'] + delta
+        input_batch['label'] = batch['label']
+
+        metrics = p_eval_step(opt_repl.target,
+                              state_repl,
+                              input_batch)
+        train_acc.append(1.0 - metrics['error_rate'])
+        train_loss.append(metrics['loss'])
+
         # break
 
-        if step % FLAGS.test_every_steps == 0 or step == 1 or step == train_steps:
+        if step % FLAGS.test_every_steps == 0 or step == 1 or step == train_steps or step % batches_per_train == 0:
             loss, acc = [], []
             r_loss, r_acc = [], []
-            for batch_idx, batch in zip(range(test_steps), test_ds.as_numpy_iterator()):
+            for batch_idx, test_batch in zip(range(test_steps), test_ds.as_numpy_iterator()):
                 metrics = p_eval_step(opt_repl.target,
                                       state_repl,
-                                      batch)
-                # r_metrics = p_eval_robust_step(opt=opt_repl,
-                #                                state=state_repl,
-                #                                rnd_key=sharded_keys,
-                #                                batch=batch)
+                                      test_batch)
+                r_metrics = p_eval_robust_step(opt=opt_repl,
+                                                   state=state_repl,
+                                                   rnd_key=sharded_keys,
+                                                   batch=test_batch)
 
                 loss.append(metrics['loss'])
                 acc.append(1.0 - metrics['error_rate'])
-                # r_loss.append(r_metrics['loss'])
-                # r_acc.append(1.0 - r_metrics['error_rate'])
+                r_loss.append(r_metrics['loss'])
+                r_acc.append(1.0 - r_metrics['error_rate'])
 
             # wandb.log({"loss": np.mean(loss),
             #            "acc": np.mean(acc),
             #            "robust_loss": np.mean(r_loss),
             #            "robust_acc": np.mean(r_acc)},
             #           step=step)
-            print("Test on step", step,
-                  "@loss:", np.mean(loss),
-                  "@acc:", np.mean(acc),
-                  # "@r_loss:", np.mean(r_loss),
-                  # "@r_acc:", np.mean(r_acc),
-                  flush=True)
+            if step % batches_per_train == 0 or step == 1:
+                print("Test on epoch", step // batches_per_train,
+                      "@loss:", np.mean(loss),
+                      "@acc:", np.mean(acc),
+                      "@r_loss:", np.mean(r_loss),
+                      "@r_acc:", np.mean(r_acc),
+                      "@train_loss:", np.mean(train_loss),
+                      "@train_acc:", np.mean(train_acc),
+                      flush=True)
+                # exit(0)
+                train_acc = []
+                train_loss = []
+            # else:
+            #     print("Test on step", step,
+            #           "@loss:", np.mean(loss),
+            #           "@acc:", np.mean(acc),
+            #           "@r_loss:", np.mean(r_loss),
+            #           "@r_acc:", np.mean(r_acc),
+            #           flush=True)
 
             accs.append(np.mean(acc))
             losses.append(np.mean(loss))
             steps.append(step)
+
     print('final', np.mean(mean, axis=0), np.mean(std, axis=0))
 
 

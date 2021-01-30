@@ -75,13 +75,13 @@ def constant_lr(base_lr, num_steps, warmup=0):
 
 def cross_entory_loss_vec(logits, labels):
     logp = jax.nn.log_softmax(logits)
-    return jnp.sum(logp * labels, axis=1)
+    return -jnp.sum(logp * labels, axis=1)
 
 
 def cross_entropy_loss(logits, labels):
     # logp = jax.nn.log_softmax(logits)
     # return -jnp.mean(jnp.sum(logp * labels, axis=1))
-    return -jnp.mean(cross_entory_loss_vec(logits, labels))
+    return jnp.mean(cross_entory_loss_vec(logits, labels))
 
 
 def model_loss(params, images, labels, delta, model_fn):
@@ -97,11 +97,11 @@ def evaluate(opt, images, labels, model_fn):
 
 
 def attack_pgd(opt, state, rnd_key, batch, eps, alpha,  attack_iters, restarts):
-    def loss_fn(model, delta):
+    def loss_fn(model, d, input_batch):
         with flax.nn.stateful(state) as new_state:
             with flax.nn.stochastic(rnd_key):
-                logits = model(batch['image'] + delta)
-        loss = cross_entropy_loss(logits, batch['label'])
+                logits = model(input_batch['image'] + d)
+        loss = cross_entropy_loss(logits, input_batch['label'])
         return loss
 
     def loss_vec_fn(model, delta):
@@ -112,31 +112,55 @@ def attack_pgd(opt, state, rnd_key, batch, eps, alpha,  attack_iters, restarts):
         return loss
 
     X, y = batch['image'], batch['label']
-    max_loss = jnp.zeros((y.shape[0]))
-    max_delta = jnp.zeros_like(X)
+    # max_loss = jnp.zeros((y.shape[0]))
+    # max_delta = jnp.zeros_like(X)
+    # eps = eps * 0.0 + 3.0
+    restarts = 1
     with loops.Scope() as s:
+        s.max_loss = jnp.zeros((y.shape[0]))
+        s.max_delta = jnp.zeros_like(X)
+        s.delta = jnp.zeros_like(X)
         for _ in s.range(restarts):
-            delta = init_delta(rnd_key, eps, batch)
+            s.delta = init_delta(rnd_key, eps, batch)
             for _ in s.range(attack_iters):
-                _, g_d = jax.value_and_grad(loss_fn, 1)(opt.target, delta)
-                delta = update_delta(X, delta, g_d, eps, alpha, X.shape[-1])
+                with flax.nn.stateful(state) as new_state:
+                    with flax.nn.stochastic(rnd_key):
+                        logits = opt.target(batch['image'] + s.delta, train=False)
+                hit = (jnp.argmax(logits, -1) == jnp.argmax(batch['label'], -1)).reshape(-1, 1, 1, 1)
+                # hit = jax.experimental.host_callback.id_print(jnp.sum(hit), result=hit, a='HIT')
+                for _ in s.cond_range(jnp.sum(hit) > 0):
+                    g_d = jax.grad(loss_fn, 1)(opt.target, s.delta, batch)
+                    # g_d = jax.experimental.host_callback.id_print(jnp.mean(l), result=g_d, a='loss')
+                    s.delta = update_delta(X, s.delta, g_d, eps, alpha, X.shape[-1], hit)
 
-            loss = -loss_vec_fn(opt.target, delta)
-            joint_loss = jnp.stack([max_loss, loss])
+            loss = loss_vec_fn(opt.target, s.delta)
 
-            indexes = jnp.argmax(joint_loss, axis=0).reshape(-1, 1, 1, 1)
-            max_delta = max_delta * (1 - indexes) + delta * indexes
-            max_loss = jnp.maximum(max_loss, loss)
+            indexes = (s.max_loss < loss).reshape(-1, 1, 1, 1) #jnp.argmax(joint_loss, axis=0).reshape(-1, 1, 1, 1)
+            # indexes = jax.experimental.host_callback.id_print(jnp.sum(indexes), result=indexes, a='WILL REPLACE')
+            s.max_delta = s.max_delta * (1 - indexes) + s.delta * indexes
+            s.max_loss = jnp.maximum(s.max_loss, loss)
+            with flax.nn.stateful(state) as new_state:
+                with flax.nn.stochastic(rnd_key):
+                    logits = opt.target(batch['image'] + s.max_delta, train=False)
+            hit = (jnp.argmax(logits, -1) == jnp.argmax(batch['label'], -1)).reshape(-1, 1, 1, 1)
+            # s.max_delta = jax.experimental.host_callback.id_print(jnp.sum(hit), result=s.max_delta, a='FINAL HIT')
+
+            # s.max_loss = jax.experimental.host_callback.id_print(jnp.mean(max_loss), result=max_loss, a='max_loss')
+
             # max_delta = delta
+        # max_delta = jax.experimental.host_callback.id_print(jnp.max(max_delta), result=max_delta, a='MAX max_delta')
+        # max_delta = jax.experimental.host_callback.id_print(jnp.min(max_delta), result=max_delta, a='MIN max_delta')
 
-    return max_delta
+        return s.max_delta
+
+    # return max_delta
 
 
 def calculate_delta(opt, state, rnd_key, batch, eps, alpha):
     def loss_fn(model, delta):
         with flax.nn.stateful(state) as new_state:
             with flax.nn.stochastic(rnd_key):
-                logits = model(batch['image'] + delta)
+                logits = model(batch['image'] + delta, train=False)
         loss = cross_entropy_loss(logits, batch['label'])
         return loss
 
@@ -145,13 +169,17 @@ def calculate_delta(opt, state, rnd_key, batch, eps, alpha):
     _, _, _, channels_number = x.shape
     delta = init_delta(rnd_input, eps, batch)
     _, g_d = jax.value_and_grad(loss_fn, 1)(opt.target, delta)
+    with flax.nn.stateful(state) as new_state:
+        with flax.nn.stochastic(rnd_key):
+            logits = opt.target(batch['image'] + delta)
 
-    delta = update_delta(x, delta, g_d, eps, alpha, channels_number)
+    delta = update_delta(x, delta, g_d, eps, alpha, channels_number, 1)
     return delta
 
 
-def update_delta(x, delta, g_d, eps, alpha, channels_number):
+def update_delta(x, delta, g_d, eps, alpha, channels_number, mask):
     deltas = []
+    saved_delta=delta
     for channel_idx in range(channels_number):
         new_d = delta[..., channel_idx] + alpha[channel_idx] * jnp.sign(g_d)[..., channel_idx]
         new_d = jax.lax.clamp(-eps[channel_idx], new_d, eps[channel_idx])
@@ -159,10 +187,12 @@ def update_delta(x, delta, g_d, eps, alpha, channels_number):
         input = x[..., channel_idx]
         lower = lower_limit[channel_idx] - input
         upper = upper_limit[channel_idx] - input
-        new_d = jnp.maximum(jnp.minimum(new_d, upper), lower)
+        new_d = jax.lax.clamp(lower, new_d, upper)
+        # new_d = jnp.maximum(jnp.minimum(new_d, upper), lower)
 
         deltas.append(new_d)
     delta = jnp.stack(deltas, axis=-1)
+    delta = delta * mask + saved_delta * (1 - mask)
     return delta
 
 
@@ -205,7 +235,7 @@ def update_stateful(opt, state, rnd_key, lr, batch, eps, alpha):
     # loss = jax.experimental.host_callback.id_print(jnp.mean(loss), result=loss)
     grad = jax.lax.pmean(grad, 'batch')
     new_opt = opt.apply_gradient(grad, learning_rate=lr)
-    return new_opt, new_state
+    return new_opt, new_state, delta
 
 
 # def compute_metrics(logits, labels):
@@ -224,6 +254,7 @@ def robust_eval_step(opt, eps, rnd_key, pgd_alpha, state, batch):
     state = jax.lax.pmean(state, 'batch')
     # adv_x = pgd(opt.target, batch['image'], eps, pgd_alpha, 50, np.inf)
     delta = attack_pgd(opt, state, rnd_key, batch, eps, pgd_alpha, 50, 10)
+    # delta = jax.experimental.host_callback.id_print(jnp.std(delta), result=delta)
     with flax.nn.stateful(state, mutable=False):
         logits = opt.target(batch['image'] + delta, train=False)
     metrics = compute_metrics(logits, batch['label'])
