@@ -34,6 +34,12 @@ DATASET_SPLITS = {
   'imagenet2012': {'train': 'train', 'test': 'validation'},
 }
 
+# CIFAR10 stats
+cifar10_mean = np.array([0.4914, 0.4822, 0.4465])
+cifar10_std = np.array([0.2471, 0.2435, 0.2616])
+
+upper_limit = ((1 - cifar10_mean) / cifar10_std)
+lower_limit = ((0 - cifar10_mean) / cifar10_std)
 
 def get_dataset_info(dataset, split, examples_per_class):
   data_builder = tfds.builder(dataset)
@@ -110,6 +116,7 @@ def get_data(dataset, mode,
       # im = tf.image.resize(im, [crop_size, crop_size])
       pass
     im_channels = []
+
     for channel_idx, (mean, std) in enumerate(zip([0.4914, 0.4822, 0.4465], [0.2471, 0.2435, 0.2616])):
       im_channels.append((im[..., channel_idx] - mean)/std)
     im = tf.stack(im_channels, axis=-1)
