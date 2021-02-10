@@ -13,33 +13,14 @@ import jax.experimental.host_callback
 import jax.nn
 
 import math
-from jax import random
-
-
-def uniform(scale=1.0 / math.sqrt(512), dtype=jnp.float32):
-    def init(key, shape, dtype=dtype):
-        return random.uniform(key, shape, dtype) * scale
-
-    return init
 
 
 class PreActBlock(nn.Module):
     def apply(self, x, in_planes, planes, stride=1, expansion=1, train=True):
-        # x = x * 0.0 + 1
-        # x = jax.experimental.host_callback.id_print(jnp.mean(x), result = x, a = "X mean")
         y = nn.BatchNorm(x,
-                         # axis=(1,2,3),
                          use_running_average=not train,
-                         # use_running_average=True,
                          momentum=0.9,
-                         # momentum=0.2,
                          epsilon=1e-5)
-        # y = x
-        # y = jax.experimental.host_callback.id_print(jnp.mean(y), result = y, a = "After batchnorm")
-        # y = jax.experimental.host_callback.id_print(jnp.std(y), result = y, a = "STD")
-
-        # print(y.shape)
-        # y = x
         y = jax.nn.relu(y)
         if stride != 1 or in_planes != expansion * planes:
             short_y = nn.Conv(inputs=y,
@@ -71,7 +52,6 @@ class PreActBlock(nn.Module):
                     padding=((1, 1), (1, 1)),
                     bias=False)
         y += short_y
-        # y *= 0.0
         return y
 
 
@@ -179,7 +159,8 @@ class PreActResNet(nn.Module):
         y = y.reshape((y.shape[0], -1))
 
         def my_init(key, shape, dtype=jnp.float32):
-            return initializers.uniform(scale=2.0 / math.sqrt(512))(key, shape, dtype) - 1.0 / math.sqrt(512)
+            param = y.shape[-1]
+            return initializers.uniform(scale=2.0 / math.sqrt(param))(key, shape, dtype) - 1.0 / math.sqrt(param)
 
         y = nn.Dense(y, features=num_outputs, bias_init=my_init)
         return y

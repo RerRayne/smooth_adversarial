@@ -190,3 +190,26 @@ class WideResnetShakeShake(nn.Module):
         x = x.reshape((x.shape[0], -1))
         x = nn.Dense(x, num_outputs)
         return x
+
+
+WideResnet18 = WideResnet.partial(blocks_per_group=[2, 2, 2, 2],
+                                  channel_multiplier=1)
+WideResNet34 = WideResnet.partial(blocks_per_group=[3, 4, 6, 3],
+                                  channel_multiplier=1)
+WideResNet50 = WideResnet.partial(blocks_per_group=[3, 4, 6, 3],
+                                  channel_multiplier=4)
+WideResNet101 = WideResnet.partial(blocks_per_group=[3, 4, 23, 3],
+                                   channel_multiplier=4)
+WideResNet152 = WideResnet.partial(blocks_per_group=[3, 8, 36, 3],
+                                   channel_multiplier=4)
+
+WideResnetShakeShake18 = WideResnetShakeShake.partial(blocks_per_group=[2, 2, 2, 2],
+                                                      channel_multiplier=1)
+WideResNetShakeShake34 = WideResnetShakeShake.partial(blocks_per_group=[3, 4, 6, 3],
+                                                      channel_multiplier=1)
+WideResNetShakeShake50 = WideResnetShakeShake.partial(blocks_per_group=[3, 4, 6, 3],
+                                                      channel_multiplier=4)
+WideResNetShakeShake101 = WideResnetShakeShake.partial(blocks_per_group=[3, 4, 23, 3],
+                                                       channel_multiplier=4)
+WideResNetShakeShake152 = WideResnetShakeShake.partial(blocks_per_group=[3, 8, 36, 3],
+                                                       channel_multiplier=4)

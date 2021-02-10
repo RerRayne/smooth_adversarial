@@ -17,12 +17,9 @@
 # resource.setrlimit(resource.RLIMIT_NOFILE, (high, high))
 
 import tensorflow as tf
-import tensorflow_probability as tfp
 import tensorflow_datasets as tfds
 
 import numpy as np
-import jax.numpy as jnp
-
 
 # Adjust depending on the available RAM.
 MAX_IN_MEMORY = 200_000
@@ -34,12 +31,6 @@ DATASET_SPLITS = {
   'imagenet2012': {'train': 'train', 'test': 'validation'},
 }
 
-# CIFAR10 stats
-cifar10_mean = np.array([0.4914, 0.4822, 0.4465])
-cifar10_std = np.array([0.2471, 0.2435, 0.2616])
-
-upper_limit = ((1 - cifar10_mean) / cifar10_std)
-lower_limit = ((0 - cifar10_mean) / cifar10_std)
 
 def get_dataset_info(dataset, split, examples_per_class):
   data_builder = tfds.builder(dataset)
@@ -78,10 +69,13 @@ def sample_subset(data, num_examples, num_classes,
 
 
 def get_data(dataset, mode,
-             repeats, batch_size,
+             repeats,
+             batch_size,
+             data_mean,
+             data_std,
              crop_size,
-             mixup_alpha,
-             examples_per_class, examples_per_class_seed,
+             examples_per_class,
+             examples_per_class_seed,
              num_devices,
              tfds_manual_dir):
 
@@ -107,17 +101,12 @@ def get_data(dataset, mode,
     im = tf.image.convert_image_dtype(im, tf.float32)
 
     if mode == 'train':
-      # im = tf.image.resize(im, [resize_size, resize_size])
       im = tf.image.pad_to_bounding_box(im, 4, 4, 40, 40)
       im = tf.image.random_crop(im, [crop_size, crop_size, 3])
       im = tf.image.flip_left_right(im)
-    else:
-      # usage of crop_size here is intentional
-      # im = tf.image.resize(im, [crop_size, crop_size])
-      pass
     im_channels = []
 
-    for channel_idx, (mean, std) in enumerate(zip([0.4914, 0.4822, 0.4465], [0.2471, 0.2435, 0.2616])):
+    for channel_idx, (mean, std) in enumerate(zip(data_mean, data_std)):
       im_channels.append((im[..., channel_idx] - mean)/std)
     im = tf.stack(im_channels, axis=-1)
     label = tf.one_hot(data['label'], dataset_info['num_classes'])
@@ -129,18 +118,6 @@ def get_data(dataset, mode,
     data = data.shuffle(min(dataset_info['num_examples'], MAX_IN_MEMORY))
   data = data.map(_pp, tf.data.experimental.AUTOTUNE)
   data = data.batch(batch_size, drop_remainder=True)
-
-  def _mixup(data):
-    beta_dist = tfp.distributions.Beta(mixup_alpha, mixup_alpha)
-    beta = tf.cast(beta_dist.sample([]), tf.float32)
-    data['image'] = (beta * data['image'] +
-                     (1 - beta) * tf.reverse(data['image'], axis=[0]))
-    data['label'] = (beta * data['label'] +
-                     (1 - beta) * tf.reverse(data['label'], axis=[0]))
-    return data
-
-  if mixup_alpha is not None and mixup_alpha > 0.0 and mode == 'train':
-    data = data.map(_mixup, tf.data.experimental.AUTOTUNE)
 
   # Shard data such that it can be distributed accross devices
   def _shard(data):
