@@ -39,6 +39,16 @@ models = {
     'preresnet50': models.PreActResNet50,
     'preresnet101': models.PreActResNet101,
     'preresnet152': models.PreActResNet152,
+    'wideresnet18': models.WideResnet18,
+    'wideresnet34': models.WideResNet34,
+    'wideresnet50': models.WideResNet50,
+    'wideresnet101': models.WideResNet101,
+    'wideresnet152': models.WideResNet152,
+    'wideresnetshake18': models.WideResnetShakeShake18,
+    'wideresnet34': models.WideResnetShakeShake34,
+    'wideresnet50': models.WideResnetShakeShake50,
+    'wideresnet101': models.WideResnetShakeShake101,
+    'wideresnet152': models.WideResnetShakeShake152,
 }
 
 # Define script parameters
