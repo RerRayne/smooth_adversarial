@@ -2,5 +2,6 @@ absl
 flax
 jax
 numpy
-cleverhans
 wandb
+tqdm
+tensorflow

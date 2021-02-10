@@ -6,8 +6,13 @@ Reference:
 '''
 import flax
 from flax import nn
+from flax.nn import initializers
+import jax.numpy as jnp
+import jax.experimental.host_callback
 
 import jax.nn
+
+import math
 
 
 class PreActBlock(nn.Module):
@@ -33,10 +38,12 @@ class PreActBlock(nn.Module):
                     strides=(stride, stride),
                     padding=((1, 1), (1, 1)),
                     bias=False)
+        z = y
         y = nn.BatchNorm(y,
                          use_running_average=not train,
                          momentum=0.9,
                          epsilon=1e-5)
+        y = z
         y = jax.nn.relu(y)
         y = nn.Conv(inputs=y,
                     features=planes,
@@ -143,9 +150,19 @@ class PreActResNet(nn.Module):
                                    stride=2,
                                    expansion=expansion,
                                    train=train)
+        y = jax.nn.relu(y)
+        y = nn.BatchNorm(y,
+                         use_running_average=not train,
+                         momentum=0.9,
+                         epsilon=1e-5)
         y = flax.nn.avg_pool(y, window_shape=(4, 4))
         y = y.reshape((y.shape[0], -1))
-        y = nn.Dense(y, features=num_outputs)
+
+        def my_init(key, shape, dtype=jnp.float32):
+            param = y.shape[-1]
+            return initializers.uniform(scale=2.0 / math.sqrt(param))(key, shape, dtype) - 1.0 / math.sqrt(param)
+
+        y = nn.Dense(y, features=num_outputs, bias_init=my_init)
         return y
 
     def _block(self,
